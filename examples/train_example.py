@@ -1,6 +1,17 @@
-
 from typing import List
-from trlx.data.default_configs import TRLConfig, default_ppo_config
+import os
+from dataclasses import dataclass
+from transformers import AutoTokenizer
+import torch
+from trlx.data.configs import (
+    ModelConfig,
+    OptimizerConfig,
+    SchedulerConfig,
+    TokenizerConfig,
+    TrainConfig,
+    TRLConfig,
+)
+from trlx.models.modeling_ppo import PPOConfig
 from trlx import train
 from llm_rewards import (
     RewardModel,
@@ -10,69 +21,72 @@ from llm_rewards import (
 )
 
 
-def create_config():
-    config = TRLConfig.load_yaml("trlx/configs/ppo_config.yaml")
-
-    # Model settings
-    config.model.model_path = "Qwen/Qwen1.5-0.5B"
-    config.model.num_layers_unfrozen = 2
-
-    # Tokenizer settings
-    config.tokenizer.tokenizer_path = "Qwen/Qwen1.5-0.5B"
-    config.tokenizer.truncation_side = "right"
-    config.tokenizer.padding_side = "right"
-
-    # Training settings
-    config.train.batch_size = 4
-    config.train.epochs = 100
-    config.train.total_steps = 1000
-    config.train.seq_length = 512
-    config.train.checkpoint_interval = 1000
-    config.train.eval_interval = 100
-    config.train.pipeline = "PromptPipeline"
-    config.train.trainer = "AcceleratePPOTrainer"
-
-    # PPO settings
-    config.method.name = "PPOConfig"
-    config.method.num_rollouts = 128
-    config.method.chunk_size = 128
-    config.method.ppo_epochs = 4
-    config.method.init_kl_coef = 0.1
-    config.method.target = 6
-    config.method.horizon = 10000
-    config.method.gamma = 1
-    config.method.lam = 0.95
-    config.method.cliprange = 0.2
-    config.method.cliprange_value = 0.2
-    config.method.vf_coef = 0.1
-    config.method.scale_reward = True
-    config.method.ref_mean = None
-    config.method.ref_std = None
-    config.method.cliprange_reward = 10
-    config.method.gen_kwargs = {
-        "max_new_tokens": 256,
-        "top_k": 0,
-        "top_p": 0.9,
-        "do_sample": True
-    }
-
-    # Optimizer settings
-    config.optimizer.name = "adamw"
-    config.optimizer.kwargs = dict(
-        lr=1.4e-5,
-        betas=(0.9, 0.95),
-        eps=1.0e-8,
-        weight_decay=1.0e-6
+def create_config() -> TRLConfig:
+    """Create training configuration."""
+    return TRLConfig(
+        train=TrainConfig(
+            seq_length=512,
+            epochs=100,
+            total_steps=1000,
+            batch_size=4,
+            checkpoint_interval=1000,
+            eval_interval=100,
+            pipeline="PromptPipeline",
+            trainer="AcceleratePPOTrainer",
+            tracker="wandb",
+            logging_dir="./logs",
+            checkpoint_dir="./checkpoints",
+        ),
+        model=ModelConfig(
+            model_path="Qwen/Qwen2.5-7B-Instruct-1M",
+            num_layers_unfrozen=2,
+        ),
+        tokenizer=TokenizerConfig(
+            tokenizer_path="Qwen/Qwen2.5-7B-Instruct-1M",
+            truncation_side="right",
+            padding_side="right",
+        ),
+        optimizer=OptimizerConfig(
+            name="adamw",
+            kwargs=dict(
+                lr=1.4e-5,
+                betas=(0.9, 0.95),
+                eps=1.0e-8,
+                weight_decay=1.0e-6,
+            ),
+        ),
+        scheduler=SchedulerConfig(
+            name="cosine_annealing",
+            kwargs=dict(
+                T_max=1000,
+                eta_min=1.4e-5,
+            ),
+        ),
+        method=PPOConfig(
+            name="PPOConfig",
+            num_rollouts=128,
+            chunk_size=128,
+            ppo_epochs=4,
+            init_kl_coef=0.1,
+            target=6,
+            horizon=10000,
+            gamma=1,
+            lam=0.95,
+            cliprange=0.2,
+            cliprange_value=0.2,
+            vf_coef=0.1,
+            scale_reward=True,
+            ref_mean=None,
+            ref_std=None,
+            cliprange_reward=10,
+            gen_kwargs=dict(
+                max_new_tokens=256,
+                top_k=0,
+                top_p=0.9,
+                do_sample=True,
+            ),
+        ),
     )
-
-    # Scheduler settings
-    config.scheduler.name = "cosine_annealing"
-    config.scheduler.kwargs = dict(
-        T_max=1000,
-        eta_min=1.4e-5
-    )
-
-    return config
 
 
 def create_prompts() -> List[str]:
@@ -83,37 +97,50 @@ def create_prompts() -> List[str]:
         "How would you solve this coding problem? Think through your approach carefully.",
         "Design a system to manage a library. Explain your design decisions with reasoning.",
         "Why do stars twinkle? Break down the scientific explanation.",
-        # Add more prompts that encourage reasoning
     ]
 
 
 def main():
+    # Set device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Create config
     config = create_config()
 
+    # Initialize reward functions
     rewards = [
         RewardModel(
             "OpenAssistant/reward-model-deberta-v3-large",
             weight=1.0,
-            batch_size=4
+            device=device,
+            batch_size=4,
         ),
         SimpleThinkReward(
             weight=0.5,
             min_words=20,
             max_words=200,
-            required_keywords=["because", "therefore", "since", "reason"]
+            required_keywords=["because", "therefore", "since", "reason"],
         ),
         LengthReward(
             target_length=512,
-            weight=0.2
-        )
+            weight=0.2,
+            tokenizer="Qwen/Qwen2.5-7B-Instruct-1M",
+        ),
     ]
 
+    # Create reward function
     reward_fn = create_reward_fn(
         rewards=rewards,
+        device=device,
         normalize=True,
-        clip_range=4.0
+        clip_range=4.0,
     )
 
+    # Ensure directories exist
+    os.makedirs("./logs", exist_ok=True)
+    os.makedirs("./checkpoints", exist_ok=True)
+
+    # Start training
     trainer = train(
         reward_fn=reward_fn,
         prompts=create_prompts(),
