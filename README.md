@@ -5,7 +5,7 @@ A lean, modular reward functions for RLHF training with LLMs. Framework-agnostic
 ## Install
 
 ```bash
-pip install -e .
+pip install llm-rewards
 ```
 
 ## Quick Start
